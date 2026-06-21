@@ -1,0 +1,6 @@
+# NOTE: .env IS committed here on purpose — it is the GitOps deploy state (image
+# tags) that CI updates and Portainer reads. It must contain NO secrets.
+# Ignore any local/secret override files instead:
+.env.local
+.env.secrets
+*.local
