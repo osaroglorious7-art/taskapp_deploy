@@ -1,0 +1,75 @@
+# TaskApp PRODUCTION stack — deployed on the server by Portainer (GitOps).
+#
+# Unlike the local docker-compose.yml (which BUILDS images), this file RUNS
+# pre-built images pulled from GHCR. CI builds + pushes each image tagged with
+# the commit SHA, then bumps BACKEND_TAG / FRONTEND_TAG in .env (this repo).
+# Portainer watches this git repo and redeploys when .env changes.
+#
+# Variable sources:
+#   * Non-secret deploy coordinates (REGISTRY, IMAGE_OWNER, *_TAG) come from the
+#     committed .env in this repo (CI updates the tags).
+#   * SECRETS (POSTGRES_PASSWORD, SECRET_KEY, ...) are set as Portainer STACK
+#     ENVIRONMENT VARIABLES in the Portainer UI and are NEVER committed.
+#
+# Ports published to the host: only 80 (frontend). backend:5000 and
+# postgres:5432 stay on the internal network. Portainer itself runs separately
+# (installed by Ansible), it is NOT part of this stack.
+
+name: taskapp
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-taskapp_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD as a Portainer stack env var}
+      POSTGRES_DB: ${POSTGRES_DB:-taskapp}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-taskapp_user} -d ${POSTGRES_DB:-taskapp}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    mem_limit: 512m          # resource caps so no one service starves the shared host
+    cpus: 0.75
+
+  backend:
+    image: ${REGISTRY:-ghcr.io}/${IMAGE_OWNER}/taskapp-backend:${BACKEND_TAG:-latest}
+    environment:
+      DATABASE_HOST: postgres
+      DATABASE_PORT: "5432"
+      DATABASE_NAME: ${POSTGRES_DB:-taskapp}
+      DATABASE_USER: ${POSTGRES_USER:-taskapp_user}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD as a Portainer stack env var}
+      SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY as a Portainer stack env var}
+      FLASK_ENV: production
+      # Lock the API to the frontend origin (override via Portainer/.env if your domain differs).
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://devops-tsacademy.com}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 1.0
+
+  frontend:
+    # VITE_API_URL=/api was baked in at BUILD time by CI, so the SPA already
+    # calls same-origin /api, proxied to the backend container by nginx.
+    image: ${REGISTRY:-ghcr.io}/${IMAGE_OWNER}/taskapp-frontend:${FRONTEND_TAG:-latest}
+    ports:
+      # Bind to LOOPBACK only — the host's edge nginx terminates TLS at
+      # devops-tsacademy.com and proxies here. Nothing is exposed to the
+      # internet except the edge nginx (80/443).
+      - "127.0.0.1:8080:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.5
+
+volumes:
+  pgdata:
